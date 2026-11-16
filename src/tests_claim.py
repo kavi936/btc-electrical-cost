@@ -278,6 +278,185 @@ def ratio_analysis(
     }
 
 
+def _forward_rets_from_entries(
+    df: pd.DataFrame,
+    entries: pd.DataFrame,
+    horizon: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forward close-to-close returns and path max-drawdown from entry rows."""
+    rets: list[float] = []
+    mdds: list[float] = []
+    for _, row in entries.iterrows():
+        fut = df[
+            (df["date"] > row["date"])
+            & (df["date"] <= row["date"] + pd.Timedelta(days=horizon))
+        ]
+        if fut.empty:
+            continue
+        start_px = float(row["close"])
+        rets.append(float(fut.iloc[-1]["close"] / start_px - 1.0))
+        mdds.append(float(fut["close"].min() / start_px - 1.0))
+    return np.asarray(rets, dtype=float), np.asarray(mdds, dtype=float)
+
+
+def _episode_starts(df: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
+    """One row per contiguous True stretch — avoids overlapping-day inflation."""
+    m = mask.fillna(False).astype(bool)
+    starts = m & ~m.shift(1, fill_value=False)
+    return df.loc[starts]
+
+
+def _ret_summary(
+    rets: np.ndarray,
+    mdds: np.ndarray,
+    *,
+    baseline_median: float,
+    baseline_mean: float,
+) -> dict[str, Any]:
+    if len(rets) == 0:
+        return {
+            "n_episodes": 0,
+            "mean_ret_pct": np.nan,
+            "median_ret_pct": np.nan,
+            "hit_rate_pct": np.nan,
+            "mean_mdd_pct": np.nan,
+            "excess_median_pp": np.nan,
+            "excess_mean_pp": np.nan,
+        }
+    return {
+        "n_episodes": int(len(rets)),
+        "mean_ret_pct": float(rets.mean() * 100),
+        "median_ret_pct": float(np.median(rets) * 100),
+        "hit_rate_pct": float((rets > 0).mean() * 100),
+        "mean_mdd_pct": float(mdds.mean() * 100) if len(mdds) else np.nan,
+        "excess_median_pp": float(np.median(rets) * 100 - baseline_median),
+        "excess_mean_pp": float(rets.mean() * 100 - baseline_mean),
+    }
+
+
+def buy_zone_analysis(
+    ohlc: pd.DataFrame,
+    costs: pd.DataFrame,
+    cfg: dict[str, Any] | None = None,
+    *,
+    cost_col: str | None = None,
+) -> dict[str, Any]:
+    """Find which %‑above‑cost bands historically had the best forward returns.
+
+    Why non-overlapping episodes: counting every day in a band reuses the same
+    forward window hundreds of times. One entry at the start of each contiguous
+    stay gives a fairer (still small-n) comparison.
+    """
+    cfg = cfg or load_config()
+    bz = cfg["tests"]["buy_zone"]
+    cost_col = cost_col or bz["cost_col"]
+    horizons = list(bz["horizons"])
+    edges = list(bz["band_edges_pct"])
+    labels = list(bz["band_labels"])
+    if len(labels) != len(edges) - 1:
+        raise ValueError("buy_zone.band_labels must have len(band_edges_pct) - 1 entries")
+
+    df = _align(ohlc, costs, cost_col)
+    df["pct_above"] = (df["close"] / df[cost_col] - 1.0) * 100.0
+    df["band"] = pd.cut(
+        df["pct_above"],
+        bins=edges,
+        labels=labels,
+        right=True,
+        include_lowest=True,
+    )
+
+    current_pct = float(df["pct_above"].iloc[-1])
+    current_band = str(df["band"].iloc[-1])
+
+    band_rows: list[dict[str, Any]] = []
+    prox_rows: list[dict[str, Any]] = []
+
+    for h in horizons:
+        # Unconditional baseline: sample every h days (non-overlapping calendar grid)
+        base_entries = df.iloc[list(range(0, len(df), h))]
+        base_rets, base_mdds = _forward_rets_from_entries(df, base_entries, h)
+        base_med = float(np.median(base_rets) * 100) if len(base_rets) else 0.0
+        base_mean = float(base_rets.mean() * 100) if len(base_rets) else 0.0
+        band_rows.append(
+            {
+                "kind": "baseline",
+                "band": "ALL (every %dd)" % h,
+                "horizon": h,
+                **_ret_summary(base_rets, base_mdds, baseline_median=base_med, baseline_mean=base_mean),
+            }
+        )
+
+        for lab in labels:
+            entries = _episode_starts(df, df["band"] == lab)
+            rets, mdds = _forward_rets_from_entries(df, entries, h)
+            band_rows.append(
+                {
+                    "kind": "band",
+                    "band": lab,
+                    "horizon": h,
+                    **_ret_summary(rets, mdds, baseline_median=base_med, baseline_mean=base_mean),
+                }
+            )
+
+        for cap in bz["proximity_caps_pct"]:
+            entries = _episode_starts(df, df["pct_above"] <= float(cap))
+            rets, mdds = _forward_rets_from_entries(df, entries, h)
+            prox_rows.append(
+                {
+                    "within_pct": float(cap),
+                    "horizon": h,
+                    **_ret_summary(rets, mdds, baseline_median=base_med, baseline_mean=base_mean),
+                }
+            )
+
+    bands_df = pd.DataFrame(band_rows)
+    prox_df = pd.DataFrame(prox_rows)
+
+    # Recommendation: prefer 365d median excess among bands with enough episodes
+    h_pref = 365 if 365 in horizons else horizons[-1]
+    cand = bands_df[(bands_df["kind"] == "band") & (bands_df["horizon"] == h_pref)].copy()
+    cand = cand[cand["n_episodes"] >= 5].sort_values("excess_median_pp", ascending=False)
+
+    recommendation = {
+        "best_edge_range_pct": [
+            float(bz["recommended_low_pct"]),
+            float(bz["recommended_high_pct"]),
+        ],
+        "stretch_range_pct": [
+            float(bz["recommended_low_pct"]),
+            float(bz["stretch_high_pct"]),
+        ],
+        "fade_above_pct": float(bz["fade_above_pct"]),
+        "current_pct_above": current_pct,
+        "current_band": current_band,
+        "in_recommended": float(bz["recommended_low_pct"])
+        <= current_pct
+        <= float(bz["recommended_high_pct"]),
+        "in_stretch": float(bz["recommended_low_pct"])
+        <= current_pct
+        <= float(bz["stretch_high_pct"]),
+        "top_bands_by_excess_median": cand.head(3)[["band", "n_episodes", "median_ret_pct", "excess_median_pp"]].to_dict(
+            orient="records"
+        ),
+        "narrative": (
+            f"Historically, non-overlapping entries when price was "
+            f"{bz['recommended_low_pct']:.0f}–{bz['recommended_high_pct']:.0f}% above "
+            f"Model A electrical cost had the strongest median forward returns vs baseline; "
+            f"stretch to ~{bz['stretch_high_pct']:.0f}% still helped; edge faded above "
+            f"~{bz['fade_above_pct']:.0f}%. Today price is {current_pct:.1f}% above cost "
+            f"({current_band})."
+        ),
+    }
+
+    return {
+        "cost_col": cost_col,
+        "bands": bands_df,
+        "proximity": prox_df,
+        "recommendation": recommendation,
+    }
+
+
 def current_state(
     ohlc: pd.DataFrame,
     costs: pd.DataFrame,
@@ -389,6 +568,11 @@ def run_all_tests(
 
     state = current_state(ohlc, costs, cbeci, network, cfg)
 
+    buy_zone = buy_zone_analysis(ohlc, costs, cfg)
+    save_parquet(buy_zone["bands"], processed / "buy_zone_bands.parquet")
+    save_parquet(buy_zone["proximity"], processed / "buy_zone_proximity.parquet")
+    logger.info("Buy-zone recommendation: %s", buy_zone["recommendation"]["narrative"])
+
     # Primary claim = electrical cost (Model A guess / Model B), not Capriole "production"
     # cost (electrical / 0.6), which is a wider and weaker floor.
     elec_mask = summary_df["cost_col"].isin(["cost_A_guess_sma7", "cost_B_sma7"])
@@ -437,6 +621,7 @@ def run_all_tests(
         "forward_returns": forwards,
         "ratios": ratios,
         "current_state": state,
+        "buy_zone": buy_zone,
     }
 
 

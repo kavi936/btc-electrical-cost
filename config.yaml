@@ -77,6 +77,27 @@ tests:
   model_a_sanity_low: 40000
   model_a_sanity_high: 70000
   claimed_current_cost: 55000
+  # Buy-zone study: pct_above = (close/cost - 1)*100. Edges are inclusive on the right
+  # except the open -inf / +inf ends. One entry per contiguous stay in a band.
+  buy_zone:
+    cost_col: cost_A_guess_sma7
+    band_edges_pct: [-1000, 0, 10, 20, 30, 50, 100, 10000]
+    band_labels:
+      - "≤0% (at/below)"
+      - "0–10%"
+      - "10–20%"
+      - "20–30%"
+      - "30–50%"
+      - "50–100%"
+      - ">100%"
+    proximity_caps_pct: [0, 10, 20, 30, 40]
+    # Horizons used for the buy-zone recommendation panel
+    horizons: [180, 365]
+    # Recommended accumulation window (for report copy); derived from historical edge
+    recommended_low_pct: 0
+    recommended_high_pct: 20
+    stretch_high_pct: 30
+    fade_above_pct: 40
 
 venues:
   - bitstamp

@@ -112,6 +112,45 @@ def _fig_ratio(ratio_series: pd.DataFrame, cost_col: str, bands: dict[str, float
     return fig
 
 
+def _fig_buy_zone(bands: pd.DataFrame, horizon: int = 365) -> go.Figure:
+    """Bar chart of median forward return by %‑above‑cost band (non-overlapping)."""
+    sub = bands[(bands["kind"] == "band") & (bands["horizon"] == horizon)].copy()
+    if sub.empty:
+        return go.Figure()
+    colors = ["#2ca02c" if x > 0 else "#d62728" for x in sub["excess_median_pp"].fillna(0)]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=sub["band"],
+                y=sub["median_ret_pct"],
+                marker_color=colors,
+                text=[
+                    f"n={int(n)}<br>ex {ex:+.0f}pp"
+                    for n, ex in zip(sub["n_episodes"], sub["excess_median_pp"])
+                ],
+                textposition="outside",
+                name="Median forward return",
+            )
+        ]
+    )
+    base = bands[(bands["kind"] == "baseline") & (bands["horizon"] == horizon)]
+    if not base.empty:
+        fig.add_hline(
+            y=float(base.iloc[0]["median_ret_pct"]),
+            line_dash="dot",
+            line_color="#555",
+            annotation_text="baseline median",
+        )
+    fig.update_layout(
+        title=f"Buy-zone bands — median {horizon}d return (non-overlapping entries)",
+        xaxis_title="% above electrical cost",
+        yaxis_title="Median forward return (%)",
+        template="plotly_white",
+        height=420,
+    )
+    return fig
+
+
 def _fig_sensitivity(sens: pd.DataFrame, title: str) -> go.Figure:
     if sens.empty:
         return go.Figure()
@@ -230,6 +269,55 @@ def build_report(
     # Episodes table (top by max % below)
     ep_html = _df_html(ep_a.head(25) if isinstance(ep_a, pd.DataFrame) else pd.DataFrame())
 
+    buy_zone = results.get("buy_zone") or {}
+    bz_rec = buy_zone.get("recommendation", {})
+    bz_bands = buy_zone.get("bands", pd.DataFrame())
+    bz_prox = buy_zone.get("proximity", pd.DataFrame())
+    fig_bz = _fig_buy_zone(bz_bands, horizon=365) if isinstance(bz_bands, pd.DataFrame) else go.Figure()
+    bz_div = plotly_plot(fig_bz, output_type="div", include_plotlyjs=False)
+
+    bz_365 = (
+        bz_bands[(bz_bands["kind"].isin(["band", "baseline"])) & (bz_bands["horizon"] == 365)][
+            [
+                "band",
+                "n_episodes",
+                "median_ret_pct",
+                "mean_ret_pct",
+                "hit_rate_pct",
+                "mean_mdd_pct",
+                "excess_median_pp",
+            ]
+        ]
+        if isinstance(bz_bands, pd.DataFrame) and not bz_bands.empty
+        else pd.DataFrame()
+    )
+    prox_365 = (
+        bz_prox[bz_prox["horizon"] == 365][
+            [
+                "within_pct",
+                "n_episodes",
+                "median_ret_pct",
+                "mean_ret_pct",
+                "hit_rate_pct",
+                "mean_mdd_pct",
+                "excess_median_pp",
+            ]
+        ]
+        if isinstance(bz_prox, pd.DataFrame) and not bz_prox.empty
+        else pd.DataFrame()
+    )
+    rec_lo, rec_hi = bz_rec.get("best_edge_range_pct", [0, 20])
+    stretch_hi = bz_rec.get("stretch_range_pct", [0, 30])[1] if bz_rec.get("stretch_range_pct") else 30
+    fade = bz_rec.get("fade_above_pct", 40)
+    cur_pct = bz_rec.get("current_pct_above", float("nan"))
+    in_rec = bz_rec.get("in_recommended", False)
+    in_stretch = bz_rec.get("in_stretch", False)
+    zone_status = (
+        "inside recommended 0–20% zone"
+        if in_rec
+        else ("inside stretch zone (≤30%)" if in_stretch else "outside accumulation zone")
+    )
+
     caveats = """
     <h2>Methodological caveats</h2>
     <ul>
@@ -304,6 +392,22 @@ def build_report(
   <p class="meta">Signal = close below cost or within X% of cost. Compared to unconditional baseline.
   <strong>Warning:</strong> sample size is small (~5–6 independent episodes); treat as descriptive.</p>
   {_df_html(fwd)}
+
+  <h2>Buy-zone study — best % above electrical cost</h2>
+  <div class="verdict">
+    <div class="ans">Recommended buy range: {rec_lo:.0f}–{rec_hi:.0f}% above cost</div>
+    <p>Stretch zone up to ~{stretch_hi:.0f}%. Edge fades above ~{fade:.0f}%.
+    Today: <strong>{cur_pct:.1f}%</strong> above Model A electrical cost — {zone_status}.</p>
+    <p class="meta">{bz_rec.get("narrative", "")}</p>
+  </div>
+  {bz_div}
+  <p class="meta">Method: one entry at the start of each contiguous stay in a band (non-overlapping),
+  then measure 365-day forward returns vs a calendar baseline (buy every 365 days).
+  Green bars = positive excess median vs baseline.</p>
+  <h3>Bands (365d)</h3>
+  {_df_html(bz_365)}
+  <h3>Proximity rule — enter when first within X% of cost (365d)</h3>
+  {_df_html(prox_365)}
 
   <h2>Price / cost ratio</h2>
   {ratio_div}
