@@ -1,0 +1,84 @@
+# Bitcoin Electrical Cost backtest — all tunable assumptions live here.
+# No hard-coded economic constants in source code.
+
+paths:
+  raw: data/raw
+  manual: data/manual
+  processed: data/processed
+  report: report.html
+
+electricity:
+  # Capriole / CCAF baseline ($/kWh)
+  price_kwh: 0.05
+  # Sensitivity grid
+  price_kwh_grid: [0.03, 0.04, 0.05, 0.06, 0.07, 0.08]
+  # Electricity share of total miner opex (Capriole Production Cost ≈ electrical / share)
+  electricity_share: 0.60
+
+pue: 1.10  # Power Usage Effectiveness (cooling overhead)
+
+smoothing:
+  reward_ma_days: 7          # CCAF uses 7-day MA of miner rewards
+  cost_ma_days: 7            # Primary cost smoother
+  cost_ma_days_optional: 21  # Optional slower smoother
+
+efficiency:
+  # Fleet average J/TH lags state-of-the-art by this many months
+  frontier_lag_months: 18
+  # Multipliers for sensitivity grid
+  multiplier_grid: [0.8, 1.0, 1.2]
+  # Piecewise-linear frontier efficiency (J/TH) by date.
+  # Sources documented in comments; fleet average = frontier lagged.
+  # S9 ~98 J/TH (2016–18): Bitmain Antminer S9 datasheet (~0.098 J/GH = 98 J/TH)
+  # S19 ~34 J/TH (2020): Bitmain Antminer S19 ~34.5 J/TH
+  # S19 XP ~21 J/TH (2022): Bitmain Antminer S19 XP ~21.5 J/TH
+  # S21 ~17.5 J/TH (2024): Bitmain Antminer S21 ~17.5 J/TH
+  # S21 XP / S23-class ~12–14 J/TH (2025–26): Bitmain S21 XP ~13.5 J/TH class
+  frontier_j_per_th:
+    - {date: "2013-01-01", j_per_th: 500.0}   # early ASIC era (approx.)
+    - {date: "2014-01-01", j_per_th: 200.0}
+    - {date: "2015-01-01", j_per_th: 150.0}
+    - {date: "2016-06-01", j_per_th: 98.0}     # Antminer S9 era
+    - {date: "2018-01-01", j_per_th: 90.0}
+    - {date: "2019-06-01", j_per_th: 55.0}     # S17-class
+    - {date: "2020-06-01", j_per_th: 34.5}     # S19
+    - {date: "2021-06-01", j_per_th: 29.0}
+    - {date: "2022-06-01", j_per_th: 21.5}     # S19 XP
+    - {date: "2023-06-01", j_per_th: 19.0}
+    - {date: "2024-04-01", j_per_th: 17.5}     # S21
+    - {date: "2025-01-01", j_per_th: 13.5}     # S21 XP class
+    - {date: "2026-01-01", j_per_th: 12.0}     # S23-class estimate
+
+halving:
+  # Block subsidy schedule (BTC per block)
+  schedule:
+    - {date: "2009-01-03", subsidy: 50.0}
+    - {date: "2012-11-28", subsidy: 25.0}
+    - {date: "2016-07-09", subsidy: 12.5}
+    - {date: "2020-05-11", subsidy: 6.25}
+    - {date: "2024-04-20", subsidy: 3.125}
+
+fetch:
+  # Bitstamp OHLC from this unix start (2011-08-18 approx first BTCUSD)
+  bitstamp_start_unix: 1313280000
+  coinbase_start: "2015-01-01"
+  kraken_start: "2013-10-01"
+  max_gap_days: 3
+  request_timeout_s: 60
+  user_agent: "btc-electrical-cost-research/1.0"
+
+tests:
+  # Forward-return horizons (days)
+  forward_horizons: [30, 90, 180, 365]
+  # Proximity bands for tradeable signal (fraction of cost)
+  proximity_bands: [0.05, 0.10, 0.20]
+  # Known-value sanity: Model A with $0.05/kWh should land roughly in Capriole's
+  # recent published band (~$45–60K; readings have ranged ~$46–71K in 2025–26).
+  model_a_sanity_low: 40000
+  model_a_sanity_high: 70000
+  claimed_current_cost: 55000
+
+venues:
+  - bitstamp
+  - coinbase
+  - kraken
